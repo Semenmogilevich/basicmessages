@@ -6,22 +6,90 @@ import { getMainMenuKb } from './menus.js';
 
 const delay = ms => new Promise(res => setTimeout(res, ms));
 
+function formatTime(ms) {
+  const seconds = Math.ceil(ms / 1000);
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m > 0) return `${m} мин ${s} сек`;
+  return `${s} сек`;
+}
+
+function getProgressBar(current, total, width = 10) {
+  const progress = Math.min(Math.max(current / total, 0), 1);
+  const filled = Math.round(width * progress);
+  const empty = width - filled;
+  return '🟩'.repeat(filled) + '⬜️'.repeat(empty);
+}
+
 export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
   const state = await db.select().from(states).where(eq(states.adminId, adminId)).get();
   if (!state) return;
 
-  const { channelId, templateText, templateEntities, links } = state;
+  const { channelId, templateText, templateEntities, links, targetIds, rangeType, rangeStartX, rangeEndY } = state;
   let linkIndex = state.linkIndex || 0;
 
+  if (!targetIds || targetIds.length === 0) {
+    await api.editMessageText({
+      chat_id: statusChatId,
+      message_id: statusMsgId,
+      text: "❌ В канале не найдено сообщений.",
+      reply_markup: getMainMenuKb()
+    });
+    return;
+  }
+
+  // targetIds is sorted newest first (descending). Reverse it if we want chronological, but Telegram users usually mean newest = first for lists, but chronological for ranges.
+  // The original python logic treated "1_to_x" as chronological (oldest to newest). Let's sort oldest first.
+  let sortedIds = [...targetIds].sort((a, b) => a - b);
+
+  let finalIds = sortedIds;
+  if (rangeType === 'last_x') {
+    finalIds = sortedIds.slice(-rangeStartX);
+  } else if (rangeType === 'first_x') {
+    finalIds = sortedIds.slice(0, rangeStartX);
+  } else if (rangeType === 'x_to_y') {
+    // 1-based indexing for users
+    const startIdx = Math.max(0, rangeStartX - 1);
+    const endIdx = rangeEndY;
+    finalIds = sortedIds.slice(startIdx, endIdx);
+  }
+
+  if (finalIds.length === 0) {
+     await api.editMessageText({
+      chat_id: statusChatId,
+      message_id: statusMsgId,
+      text: "❌ В выбранном диапазоне нет сообщений.",
+      reply_markup: getMainMenuKb()
+    });
+    return;
+  }
+
+  const totalTarget = finalIds.length;
   let editedCount = 0;
   let checkedCount = 0;
+  const startTime = Date.now();
 
-  const updateStatus = async (msg) => {
+  const updateStatus = async () => {
     try {
+      const pct = ((checkedCount / totalTarget) * 100).toFixed(0);
+      const bar = getProgressBar(checkedCount, totalTarget, 10);
+
+      const elapsed = Date.now() - startTime;
+      let etaStr = "Вычисляется...";
+      if (checkedCount > 0) {
+         const msPerItem = elapsed / checkedCount;
+         const remaining = totalTarget - checkedCount;
+         etaStr = formatTime(remaining * msPerItem);
+      }
+
       await api.editMessageText({
         chat_id: statusChatId,
         message_id: statusMsgId,
-        text: msg,
+        text: `⚡️ <b>Замена сообщений...</b>\n\n` +
+              `${bar} ${pct}%\n\n` +
+              `🔄 Проверено: <b>${checkedCount} / ${totalTarget}</b>\n` +
+              `✅ Успешно: <b>${editedCount}</b>\n` +
+              `⏳ Осталось: <b>${etaStr}</b>`,
         parse_mode: 'HTML'
       });
     } catch (e) {
@@ -29,35 +97,13 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
     }
   };
 
-  await updateStatus("🔍 Получаю список постов канала...");
+  await updateStatus();
 
-  let latestId = 0;
-  try {
-    const dummy = await api.sendMessage({ chat_id: channelId, text: "." });
-    latestId = dummy.message_id;
-    await api.deleteMessage({ chat_id: channelId, message_id: latestId });
-  } catch (err) {
-    await updateStatus("❌ Ошибка: бот не может писать в канал. Выдайте права администратора.");
-    await delay(3000);
-    await updateStatus("Главное меню:", { reply_markup: getMainMenuKb() });
-    return;
-  }
+  const CONCURRENCY = 15;
+  let lastUpdate = Date.now();
 
-  // Support full scan up to a massive depth if needed, but typically channels don't have 10M messages.
-  const MAX_DEPTH = 50000;
-  let targetIds = [];
-  for (let i = latestId; i > Math.max(0, latestId - MAX_DEPTH); i--) {
-    targetIds.push(i);
-  }
-
-  const totalTarget = targetIds.length;
-  await updateStatus(`🚀 Начинаю замену <b>до ${totalTarget}</b> возможных постов...`);
-
-  // Using a smaller concurrency to reduce rate limit hits
-  const CONCURRENCY = 10;
-
-  for (let i = 0; i < targetIds.length; i += CONCURRENCY) {
-    const batch = targetIds.slice(i, i + CONCURRENCY);
+  for (let i = 0; i < finalIds.length; i += CONCURRENCY) {
+    const batch = finalIds.slice(i, i + CONCURRENCY);
 
     const tasks = batch.map(async (msgId) => {
       let currentText = templateText;
@@ -74,7 +120,6 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
 
       const { text: safeText, entities: safeEntities } = truncateTextAndEntities(currentText, currentEntities, 4096);
 
-      // Robust retry logic
       let attempt = 0;
       let success = false;
       while (attempt < 5 && !success) {
@@ -109,19 +154,14 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
               editedCount++;
               success = true;
             } catch (e) {
-               // likely message not modified
-               if (String(e).toLowerCase().includes('not modified')) {
-                  editedCount++;
-               }
+               if (String(e).toLowerCase().includes('not modified')) editedCount++;
                success = true;
             }
           } else if (errMsg.includes('too many requests') || errMsg.includes('retry after')) {
-             // Use API provided retry_after if available, else static
              const retryAfter = err.parameters?.retry_after || 2;
-             await delay((retryAfter * 1000) + 500);
+             await delay((retryAfter * 1000) + 300);
              attempt++;
           } else {
-             // For messages that simply don't exist (e.g. deleted gaps) or other hard errors
              success = true;
           }
         }
@@ -131,24 +171,25 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
 
     await Promise.all(tasks);
 
-    if (checkedCount % (CONCURRENCY * 5) === 0 || checkedCount === totalTarget) {
-      const pct = ((checkedCount / totalTarget) * 100).toFixed(0);
-      await updateStatus(
-        `⚡️ <b>Замена постов...</b>\n\n` +
-        `Проверено ID: <code>${checkedCount}/${totalTarget}</code> (${pct}%)\n` +
-        `✅ Успешно заменено: <b>${editedCount}</b>`
-      );
+    // Update status every 2 seconds or at end
+    if (Date.now() - lastUpdate > 2000 || checkedCount === totalTarget) {
+      await updateStatus();
+      lastUpdate = Date.now();
     }
   }
 
   await db.update(states)
-    .set({ linkIndex: linkIndex % (links ? links.length : 1) })
+    .set({ linkIndex: linkIndex % (links ? links.length : 1), targetIds: null })
     .where(eq(states.adminId, adminId)).run();
 
   await api.editMessageText({
     chat_id: statusChatId,
     message_id: statusMsgId,
-    text: `🏁 <b>Замена завершена!</b>\n\n📢 Канал: <b>${state.channelTitle}</b>\n✅ Изменено постов: <b>${editedCount}</b>\n\nГлавное меню:`,
+    text: `🏁 <b>Замена завершена!</b>\n\n` +
+          `📢 Канал: <b>${state.channelTitle}</b>\n` +
+          `✅ Изменено: <b>${editedCount}</b> из ${totalTarget}\n` +
+          `⏱ Затрачено: <b>${formatTime(Date.now() - startTime)}</b>\n\n` +
+          `Главное меню:`,
     parse_mode: 'HTML',
     reply_markup: getMainMenuKb()
   });
