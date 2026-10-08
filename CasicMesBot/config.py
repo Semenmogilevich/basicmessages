@@ -1,0 +1,12 @@
+# Токены двух независимых ботов
+BOT_TOKEN = "8802167486:AAEbl0u3Zlu_ffBmHg7zjKGch2tmye1DadU"
+
+ADMIN_IDS = [5172556128, 5847661785]
+OWNER_ID = 5172556128
+
+# Данные твинка
+API_ID = 37190781
+API_HASH = "28e0e864bc7ac648c4733112fb07ab0d"
+PHONE = "+79000043285"
+PASSWORD = "Semen0510&"
+SESSION_NAME = "telethon_owner"
