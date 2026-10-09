@@ -15,7 +15,7 @@ export default async function (cb) {
   const renderMainMenu = async (textPrefix = "") => {
     let info = textPrefix ? `${textPrefix}\n\n` : "⚙️ <b>Панель управления</b>\n\n";
     info += `📢 Канал: <b>${state.channelTitle || "Не выбран"}</b>`;
-    if (state.targetIds) info += ` <i>(Активных постов: ${state.targetIds.length})</i>`;
+    if (state.targetIds && state.targetIds.length > 0) info += ` <i>(Макс ID: ${Math.max(...state.targetIds)})</i>`;
     info += `\n📝 Шаблон: <b>${state.templateText || state.templatePhoto ? "Задан ✅" : "Нет ❌"}</b> `;
     if (state.templatePhoto) info += `<i>(с фото 🖼)</i>`;
     info += "\n";
@@ -40,31 +40,7 @@ export default async function (cb) {
   };
 
   const runParserAndSave = async (chatId, msgId, channelId) => {
-      const startTime = Date.now();
-      const onProgress = async (found, checked, total) => {
-         if (checked % 20 === 0 || checked === total) {
-           const pct = ((checked/total)*100).toFixed(0);
-
-           let etaStr = "Вычисляется...";
-           if (checked > 0) {
-              const elapsed = Date.now() - startTime;
-              const msPerItem = elapsed / checked;
-              const remaining = total - checked;
-              const s = Math.ceil((remaining * msPerItem) / 1000);
-              const m = Math.floor(s / 60);
-              const sec = s % 60;
-              etaStr = m > 0 ? `${m} мин ${sec} сек` : `${sec} сек`;
-           }
-
-           await api.editMessageText({
-              chat_id: chatId,
-              message_id: msgId,
-              text: `🔍 <b>Считаю активные сообщения...</b>\n\nПроверено: <b>${checked}</b> из <b>${total}</b> (${pct}%)\nНайдено живых: <b>${found}</b>\n⏳ Осталось времени: <b>${etaStr}</b>`,
-              parse_mode: 'HTML'
-           }).catch(()=>{});
-         }
-      };
-      const targetIds = await getActivePostIds(channelId, adminId, 400, onProgress);
+      const targetIds = await getActivePostIds(channelId, adminId, 15000); // Default to a deep scan assumption
       await db.update(states).set({ targetIds }).where(eq(states.adminId, adminId)).run();
       state.targetIds = targetIds;
       return targetIds;
@@ -117,21 +93,21 @@ export default async function (cb) {
        await api.editMessageText({
          chat_id: cb.message.chat.id,
          message_id: cb.message.message_id,
-         text: "🔍 Подготовка к парсингу..."
+         text: "⚡️ Получаю ID последнего поста..."
        });
        await api.answerCallbackQuery({ callback_query_id: cb.id });
        try {
          await runParserAndSave(cb.message.chat.id, cb.message.message_id, state.channelId);
-         await renderMainMenu(`✅ Активные посты пересчитаны!`);
+         await renderMainMenu(`✅ Канал обновлен! Макс. ID: ${Math.max(...state.targetIds)}`);
        } catch (e) {
-         await renderMainMenu(`❌ Ошибка подсчета: ${e.message || e}`);
+         await renderMainMenu(`❌ Ошибка: ${e.message || e}`);
        }
     }
     else if (data === 'range_menu') {
       await api.editMessageText({
         chat_id: cb.message.chat.id,
         message_id: cb.message.message_id,
-        text: "Выберите, какие сообщения заменять (по их реальным порядковым номерам):",
+        text: "Выберите, какие сообщения заменять (по ID):",
         reply_markup: getRangeMenuKb()
       });
     }
@@ -145,7 +121,7 @@ export default async function (cb) {
       await api.editMessageText({
         chat_id: cb.message.chat.id,
         message_id: cb.message.message_id,
-        text: "🔢 Сколько ПЕРВЫХ сообщений заменить (начиная с самых старых)?",
+        text: "🔢 Сколько ПЕРВЫХ сообщений заменить (начиная с самых старых ID)?",
         reply_markup: getCancelKb()
       });
     }
@@ -154,7 +130,7 @@ export default async function (cb) {
       await api.editMessageText({
         chat_id: cb.message.chat.id,
         message_id: cb.message.message_id,
-        text: "🔢 Сколько ПОСЛЕДНИХ сообщений заменить (начиная с самых новых)?",
+        text: "🔢 Сколько ПОСЛЕДНИХ сообщений заменить (начиная с самых новых ID)?",
         reply_markup: getCancelKb()
       });
     }
@@ -163,7 +139,7 @@ export default async function (cb) {
       await api.editMessageText({
         chat_id: cb.message.chat.id,
         message_id: cb.message.message_id,
-        text: "🔢 Введите два числа через пробел (например, 10 50):",
+        text: "🔢 Введите два числа через пробел (например: ID 10 и ID 50):",
         reply_markup: getCancelKb()
       });
     }
@@ -191,14 +167,14 @@ export default async function (cb) {
           await api.editMessageText({
             chat_id: cb.message.chat.id,
             message_id: cb.message.message_id,
-            text: "⚡️ Подготовка...\n\nСчитаю живые посты канала..."
+            text: "⚡️ Получаю ID канала..."
           });
-          await runParserAndSave(cb.message.chat.id, cb.message.message_id, state.channelId);
+          targetIds = await runParserAndSave(cb.message.chat.id, cb.message.message_id, state.channelId);
         } catch (e) {
           await api.editMessageText({
             chat_id: cb.message.chat.id,
             message_id: cb.message.message_id,
-            text: `❌ Ошибка парсинга канала:\n${e.message || e}`,
+            text: `❌ Ошибка канала:\n${e.message || e}`,
             reply_markup: getMainMenuKb()
           });
           return;

@@ -36,12 +36,13 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
     await api.editMessageText({
       chat_id: statusChatId,
       message_id: statusMsgId,
-      text: "❌ В канале не найдено активных сообщений.",
+      text: "❌ Ошибка: Не удалось определить ID постов.",
       reply_markup: getMainMenuKb()
     });
     return;
   }
 
+  // targetIds originally newest first. Sort oldest first.
   let sortedIds = [...targetIds].sort((a, b) => a - b);
 
   let finalIds = sortedIds;
@@ -50,9 +51,8 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
   } else if (rangeType === 'first_x') {
     finalIds = sortedIds.slice(0, rangeStartX);
   } else if (rangeType === 'x_to_y') {
-    const startIdx = Math.max(0, rangeStartX - 1);
-    const endIdx = rangeEndY;
-    finalIds = sortedIds.slice(startIdx, endIdx);
+    // Treat inputs as ID bounds
+    finalIds = sortedIds.filter(id => id >= rangeStartX && id <= rangeEndY);
   }
 
   if (finalIds.length === 0) {
@@ -68,6 +68,7 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
   const totalTarget = finalIds.length;
   let editedCount = 0;
   let checkedCount = 0;
+  let actualFound = 0; // True count of messages that actually existed and were touched
   const startTime = Date.now();
 
   const updateStatus = async () => {
@@ -88,8 +89,8 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
         message_id: statusMsgId,
         text: `⚡️ <b>Замена сообщений...</b>\n\n` +
               `${bar} ${pct}%\n\n` +
-              `🔄 Проверено: <b>${checkedCount} / ${totalTarget}</b>\n` +
-              `✅ Успешно заменено: <b>${editedCount} / ${totalTarget}</b>\n` +
+              `🔄 Проверено ID: <b>${checkedCount} / ${totalTarget}</b>\n` +
+              `✅ Успешно заменено: <b>${editedCount}</b>\n` +
               `⏳ Осталось времени: <b>${etaStr}</b>`,
         parse_mode: 'HTML'
       });
@@ -98,7 +99,8 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
 
   await updateStatus();
 
-  const CONCURRENCY = 15;
+  // Very high concurrency because we are skipping the parsing step!
+  const CONCURRENCY = 20;
   let lastUpdate = Date.now();
 
   for (let i = 0; i < finalIds.length; i += CONCURRENCY) {
@@ -114,6 +116,7 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
         currentText = res.text;
         currentEntities = res.entities;
 
+        // Atomically increment locally
         linkIndex++;
       }
 
@@ -145,12 +148,14 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
             });
           }
           editedCount++;
+          actualFound++;
           success = true;
         } catch (err) {
           const errMsg = err.description ? err.description.toLowerCase() : String(err).toLowerCase();
 
           if (errMsg.includes('message is not modified')) {
              editedCount++;
+             actualFound++;
              success = true;
              break;
           }
@@ -165,9 +170,13 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
                 caption_entities: capEntities.length > 0 ? capEntities : undefined
               });
               editedCount++;
+              actualFound++;
               success = true;
             } catch (e) {
-               if (String(e).toLowerCase().includes('not modified')) editedCount++;
+               if (String(e).toLowerCase().includes('not modified')) {
+                  editedCount++;
+                  actualFound++;
+               }
                success = true;
             }
           } else if (errMsg.includes('too many requests') || errMsg.includes('retry after')) {
@@ -176,6 +185,7 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
              while(Date.now() - startWait < (retryAfter * 1000) + 100) { }
              attempt++;
           } else {
+             // "message to edit not found" -> it was deleted. We just skip it silently!
              success = true;
           }
         }
@@ -201,7 +211,8 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
     message_id: statusMsgId,
     text: `🏁 <b>Замена завершена!</b>\n\n` +
           `📢 Канал: <b>${state.channelTitle}</b>\n` +
-          `✅ Успешно изменено: <b>${editedCount}</b> из <b>${totalTarget}</b>\n` +
+          `✅ Успешно заменено: <b>${editedCount}</b>\n` +
+          `👻 Удаленных/пропущено: <b>${totalTarget - actualFound}</b>\n` +
           `⏱ Затрачено: <b>${formatTime(Date.now() - startTime)}</b>\n\n` +
           `Главное меню:`,
     parse_mode: 'HTML',

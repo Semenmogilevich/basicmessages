@@ -1,14 +1,19 @@
 import { api } from 'sdk';
 
 /**
- * FAST PROBING STRATEGY V4 (The ultimate safe method).
- * We simply attempt to edit the message's text to its current text, or apply `editMessageReplyMarkup`.
- * We do this strictly sequentially but without `delay` on success.
- * If we hit 429 Too Many Requests, we do a synchronous busy-wait, then continue.
+ * STRATEGY V5: ULTIMATE INSTANT SPEED.
+ * Instead of probing every single ID (which takes time if there are thousands),
+ * we simply find the LATEST message ID (by sending and instantly deleting a dummy message).
+ * That takes exactly ~0.5 seconds.
  *
- * We will update the progress in the UI so the user knows it's not frozen.
+ * Then, instead of building a huge array of "only active IDs", we just build an array
+ * of ALL IDs from 1 to `latestId` (or whatever range).
+ *
+ * At the time of REPLACEMENT, the bot will simply try to edit the ID. If it's deleted,
+ * the API says "message not found" and we just instantly skip it.
+ * This skips the parsing phase entirely, reducing parsing time to 1 second!
  */
-export async function getActivePostIds(channelId, adminId, maxDepth = 400, onProgress) {
+export async function getActivePostIds(channelId, adminId, maxDepth = 2000) {
   let latestId = 0;
   try {
     const dummy = await api.sendMessage({ chat_id: channelId, text: "." });
@@ -20,45 +25,11 @@ export async function getActivePostIds(channelId, adminId, maxDepth = 400, onPro
 
   const activeIds = [];
   const start = Math.max(1, latestId - maxDepth);
-  const total = latestId - start + 1;
-  let checkedCount = 0;
 
-  let lastProgressUpdate = Date.now();
-
+  // We simply assume ALL IDs in this range exist.
+  // We will let the replacer logic naturally skip deleted ones.
   for (let msgId = latestId; msgId >= start; msgId--) {
-    let success = false;
-    let attempt = 0;
-    while (!success && attempt < 3) {
-      try {
-        await api.editMessageReplyMarkup({
-            chat_id: channelId,
-            message_id: msgId,
-            reply_markup: { inline_keyboard: [] }
-        });
-        activeIds.push(msgId);
-        success = true;
-      } catch (err) {
-         const msg = err.description ? err.description.toLowerCase() : "";
-         if (msg.includes('message is not modified') || msg.includes('there is no text') || msg.includes('message is not a text message')) {
-             activeIds.push(msgId);
-             success = true;
-         } else if (msg.includes('too many requests') || msg.includes('retry after')) {
-             const retryAfter = err.parameters?.retry_after || 1;
-             const startWait = Date.now();
-             while(Date.now() - startWait < (retryAfter * 1000) + 100) { }
-             attempt++;
-         } else {
-             // "message to edit not found" -> deleted
-             success = true;
-         }
-      }
-    }
-    checkedCount++;
-
-    if (onProgress && Date.now() - lastProgressUpdate > 2000) {
-       await onProgress(activeIds.length, checkedCount, total).catch(()=>{});
-       lastProgressUpdate = Date.now();
-    }
+      activeIds.push(msgId);
   }
 
   return activeIds.sort((a, b) => b - a);
