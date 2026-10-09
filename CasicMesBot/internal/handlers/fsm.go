@@ -16,14 +16,22 @@ import "sync"
 var userSteps sync.Map
 var userConfigs sync.Map
 
-func SetupFSM(b *tele.Bot) {
-	b.Handle("/start", func(c tele.Context) error {
-		userSteps.Delete(c.Sender().ID)
+const VERSION = "1.6"
 
-		status, _, _ := db.GetUserStatus(c.Sender().ID)
+func renderMainMenu(b *tele.Bot, c tele.Context, prefix string) error {
+	status, _, _ := db.GetUserStatus(c.Sender().ID)
 
-		// Build menu dynamically to avoid global mutation
-		menu := &tele.ReplyMarkup{}
+	menu := &tele.ReplyMarkup{}
+	if status == "owner" {
+		menu.Inline(
+			menu.Row(BtnChannel),
+			menu.Row(BtnTemplate),
+			menu.Row(BtnLinks),
+			menu.Row(BtnRange),
+			menu.Row(BtnStart),
+			menu.Row(BtnOwnerStats),
+		)
+	} else {
 		menu.Inline(
 			menu.Row(BtnChannel),
 			menu.Row(BtnTemplate),
@@ -31,19 +39,55 @@ func SetupFSM(b *tele.Bot) {
 			menu.Row(BtnRange),
 			menu.Row(BtnStart),
 		)
+	}
 
-		if status == "owner" {
-			menu.Inline(
-				menu.Row(BtnChannel),
-				menu.Row(BtnTemplate),
-				menu.Row(BtnLinks),
-				menu.Row(BtnRange),
-				menu.Row(BtnStart),
-				menu.Row(BtnOwnerStats),
-			)
-		}
+	cfg := getConfig(c.Sender().ID)
 
-		return c.Send("👋 <b>Добро пожаловать в Про-версию на Golang!</b>\n\nЯ заменяю тексты и фото в каналах с невероятной скоростью. Поддерживаю премиум эмодзи, форматирование и динамическую подстановку <code>{link}</code> из txt-файла.", menu, tele.ModeHTML)
+	var info string
+	if prefix != "" {
+		info = prefix + "\n\n"
+	}
+	info += fmt.Sprintf("⚙️ <b>Панель управления (v%s)</b>\n\n", VERSION)
+
+	chName := cfg.ChannelTitle
+	if chName == "" { chName = "Не выбран" }
+	info += fmt.Sprintf("📢 Канал: <b>%s</b>", chName)
+	if len(cfg.TargetIDs) > 0 {
+		info += fmt.Sprintf(" <i>(Макс ID: %d)</i>", cfg.TargetIDs[0])
+	}
+	info += "\n"
+
+	tplStr := "Нет ❌"
+	if cfg.TemplateText != "" || cfg.TemplatePhoto != "" {
+		tplStr = "Задан ✅"
+	}
+	info += fmt.Sprintf("📝 Шаблон: <b>%s</b>", tplStr)
+	if cfg.TemplatePhoto != "" {
+		info += " <i>(с фото 🖼)</i>"
+	}
+	info += "\n"
+
+	if strings.Contains(cfg.TemplateText, "{link}") {
+		info += fmt.Sprintf("🔗 Ссылок загружено: <b>%d</b>\n", len(cfg.Links))
+	}
+
+	rangeStr := "Все"
+	if cfg.RangeType == "first" {
+		rangeStr = fmt.Sprintf("Первые %d", cfg.RangeStart)
+	} else if cfg.RangeType == "last" {
+		rangeStr = fmt.Sprintf("Последние %d", cfg.RangeStart)
+	} else if cfg.RangeType == "xy" {
+		rangeStr = fmt.Sprintf("С ID %d по ID %d", cfg.RangeStart, cfg.RangeEnd)
+	}
+	info += fmt.Sprintf("📊 Диапазон: <b>%s</b>\n", rangeStr)
+
+	return c.Send(info, menu, tele.ModeHTML)
+}
+
+func SetupFSM(b *tele.Bot) {
+	b.Handle("/start", func(c tele.Context) error {
+		userSteps.Delete(c.Sender().ID)
+		return renderMainMenu(b, c, "👋 <b>Добро пожаловать!</b>")
 	})
 
 	b.Handle(&BtnOwnerStats, func(c tele.Context) error {
@@ -56,7 +100,8 @@ func SetupFSM(b *tele.Bot) {
 
 	b.Handle(&BtnCancel, func(c tele.Context) error {
 		userSteps.Delete(c.Sender().ID)
-		return c.Edit("❌ Действие отменено.")
+		c.Edit("❌ Действие отменено.")
+		return renderMainMenu(b, c, "")
 	})
 
 	b.Handle(tele.OnText, func(c tele.Context) error {
@@ -95,7 +140,7 @@ func SetupFSM(b *tele.Bot) {
 			saveConfig(c.Sender().ID, cfg)
 
 			userSteps.Delete(c.Sender().ID)
-			return c.Send("✅ <b>Канал выбран:</b> " + chat.Title, tele.ModeHTML)
+			return renderMainMenu(b, c, "✅ <b>Канал выбран:</b> " + chat.Title)
 
 		case "wait_template":
 		    cfg := getConfig(c.Sender().ID)
@@ -104,27 +149,27 @@ func SetupFSM(b *tele.Bot) {
 		    cfg.TemplatePhoto = ""
 		    saveConfig(c.Sender().ID, cfg)
 		    userSteps.Delete(c.Sender().ID)
-		    return c.Send("✅ <b>Шаблон сохранен!</b> Эмодзи и форматирование учтены.", tele.ModeHTML)
+		    return renderMainMenu(b, c, "✅ <b>Шаблон сохранен!</b> Эмодзи и форматирование учтены.")
 
 		case "wait_range_first":
 		    cfg := getConfig(c.Sender().ID)
-		    cfg.RangeType = "first"
 		    num, err := strconv.Atoi(strings.TrimSpace(c.Text()))
 		    if err != nil || num <= 0 { return c.Send("❌ Введите положительное число.") }
+		    cfg.RangeType = "first"
 		    cfg.RangeStart = num
 		    saveConfig(c.Sender().ID, cfg)
 		    userSteps.Delete(c.Sender().ID)
-		    return c.Send("✅ Диапазон (Первые X) сохранен.")
+		    return renderMainMenu(b, c, "✅ Диапазон (Первые X) сохранен.")
 
 		case "wait_range_last":
 		    cfg := getConfig(c.Sender().ID)
-		    cfg.RangeType = "last"
 		    num, err := strconv.Atoi(strings.TrimSpace(c.Text()))
 		    if err != nil || num <= 0 { return c.Send("❌ Введите положительное число.") }
+		    cfg.RangeType = "last"
 		    cfg.RangeStart = num
 		    saveConfig(c.Sender().ID, cfg)
 		    userSteps.Delete(c.Sender().ID)
-		    return c.Send("✅ Диапазон (Последние X) сохранен.")
+		    return renderMainMenu(b, c, "✅ Диапазон (Последние X) сохранен.")
 
 		case "wait_range_xy":
 		    cfg := getConfig(c.Sender().ID)
@@ -140,7 +185,7 @@ func SetupFSM(b *tele.Bot) {
 		    cfg.RangeEnd = end
 		    saveConfig(c.Sender().ID, cfg)
 		    userSteps.Delete(c.Sender().ID)
-		    return c.Send(fmt.Sprintf("✅ Диапазон установлен: ID от %d до %d", start, end))
+		    return renderMainMenu(b, c, fmt.Sprintf("✅ Диапазон установлен: ID от %d до %d", start, end))
 		}
 		return nil
 	})
@@ -157,7 +202,7 @@ func SetupFSM(b *tele.Bot) {
 		}
 		saveConfig(c.Sender().ID, cfg)
 		userSteps.Delete(c.Sender().ID)
-		return c.Send("✅ <b>Шаблон (с фото) сохранен!</b>", tele.ModeHTML)
+		return renderMainMenu(b, c, "✅ <b>Шаблон (с фото) сохранен!</b>")
 	})
 
 	b.Handle(tele.OnDocument, func(c tele.Context) error {
@@ -185,45 +230,53 @@ func SetupFSM(b *tele.Bot) {
 		cfg.Links = valid
 		saveConfig(c.Sender().ID, cfg)
 		userSteps.Delete(c.Sender().ID)
-		return c.Send(fmt.Sprintf("✅ <b>Загружено %d ссылок!</b>", len(valid)), tele.ModeHTML)
+		return renderMainMenu(b, c, fmt.Sprintf("✅ <b>Загружено %d ссылок!</b>", len(valid)))
 	})
 
 	b.Handle(&BtnChannel, func(c tele.Context) error {
 		userSteps.Store(c.Sender().ID, "wait_channel")
-		return c.Edit("📢 <b>Отправьте канал:</b>\n\n- Перешлите пост\n- Пришлите ссылку (t.me/...)\n- ID (-100...)", MenuCancel, tele.ModeHTML)
+		c.Edit("📢 <b>Отправьте канал:</b>\n\n- Перешлите пост\n- Пришлите ссылку (t.me/...)\n- ID (-100...)", MenuCancel, tele.ModeHTML)
+		return c.Respond()
 	})
 
 	b.Handle(&BtnTemplate, func(c tele.Context) error {
 		userSteps.Store(c.Sender().ID, "wait_template")
-		return c.Edit("📝 <b>Отправьте текст или фото с подписью.</b>", MenuCancel, tele.ModeHTML)
+		c.Edit("📝 <b>Отправьте текст или фото с подписью.</b>", MenuCancel, tele.ModeHTML)
+		return c.Respond()
 	})
 
 	b.Handle(&BtnLinks, func(c tele.Context) error {
 		userSteps.Store(c.Sender().ID, "wait_links")
-		return c.Edit("📄 <b>Отправьте .txt файл</b>, где каждая ссылка с новой строки.", MenuCancel, tele.ModeHTML)
+		c.Edit("📄 <b>Отправьте .txt файл</b>, где каждая ссылка с новой строки.", MenuCancel, tele.ModeHTML)
+		return c.Respond()
 	})
 
 	b.Handle(&BtnRange, func(c tele.Context) error {
-	    return c.Edit("Выберите, какие сообщения заменять:", MenuRange)
+	    c.Edit("Выберите, какие сообщения заменять:", MenuRange)
+	    return c.Respond()
 	})
 
 	b.Handle(&BtnRangeAll, func(c tele.Context) error {
 	    cfg := getConfig(c.Sender().ID)
 	    cfg.RangeType = ""
 	    saveConfig(c.Sender().ID, cfg)
-	    return c.Edit("✅ Выбраны все сообщения.")
+	    c.Edit("✅ Выбраны все сообщения.")
+	    return renderMainMenu(b, c, "")
 	})
 	b.Handle(&BtnRangeFirst, func(c tele.Context) error {
 	    userSteps.Store(c.Sender().ID, "wait_range_first")
-	    return c.Edit("🔢 Сколько ПЕРВЫХ сообщений заменить (начиная с самых старых ID)?", MenuCancel)
+	    c.Edit("🔢 Сколько ПЕРВЫХ сообщений заменить (начиная с самых старых ID)?", MenuCancel)
+	    return c.Respond()
 	})
 	b.Handle(&BtnRangeLast, func(c tele.Context) error {
 	    userSteps.Store(c.Sender().ID, "wait_range_last")
-	    return c.Edit("🔢 Сколько ПОСЛЕДНИХ сообщений заменить (начиная с самых новых ID)?", MenuCancel)
+	    c.Edit("🔢 Сколько ПОСЛЕДНИХ сообщений заменить (начиная с самых новых ID)?", MenuCancel)
+	    return c.Respond()
 	})
 	b.Handle(&BtnRangeXY, func(c tele.Context) error {
 	    userSteps.Store(c.Sender().ID, "wait_range_xy")
-	    return c.Edit("🔢 Введите два числа через пробел (например: ID 10 и ID 50):", MenuCancel)
+	    c.Edit("🔢 Введите два числа через пробел (например: ID 10 и ID 50):", MenuCancel)
+	    return c.Respond()
 	})
 
 	b.Handle(tele.OnChannelPost, func(c tele.Context) error {
@@ -236,7 +289,7 @@ func SetupFSM(b *tele.Bot) {
 			cfg.ChannelTitle = chat.Title
 			saveConfig(c.Sender().ID, cfg)
 			userSteps.Delete(c.Sender().ID)
-			return c.Send("✅ <b>Канал выбран:</b> " + chat.Title, tele.ModeHTML)
+			return renderMainMenu(b, c, "✅ <b>Канал выбран:</b> " + chat.Title)
 		}
 	    }
 	    return nil
@@ -252,9 +305,11 @@ func SetupFSM(b *tele.Bot) {
 
 		ids, err := replacer.GetTargetIDs(b, cfg.ChannelID, 50000)
 		if err != nil {
-		   return c.Edit("❌ Ошибка канала: " + err.Error())
+		   c.Send("❌ Ошибка канала: " + err.Error())
+		   return renderMainMenu(b, c, "")
 		}
 		cfg.TargetIDs = ids
+		saveConfig(c.Sender().ID, cfg)
 
 		statusMsg, _ := b.Send(c.Sender(), "🚀 <b>Запуск пула воркеров...</b>", tele.ModeHTML)
 		go replacer.RunTask(b, cfg, c.Sender(), statusMsg)
