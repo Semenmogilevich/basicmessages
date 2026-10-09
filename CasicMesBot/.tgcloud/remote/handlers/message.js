@@ -4,6 +4,8 @@ import { states } from '../schema.js';
 import { getMainMenuKb, getCancelKb, getUsePreviousLinksKb } from '../lib/menus.js';
 import { getActivePostIds } from '../lib/webParser.js';
 
+const VERSION = "v1.2 (Fast Edit Probe)";
+
 export default async function (message) {
   const adminId = message.from.id;
 
@@ -43,7 +45,7 @@ export default async function (message) {
     await db.update(states).set({ step: 'idle' }).where(eq(states.adminId, adminId)).run();
     await api.sendMessage({
       chat_id: adminId,
-      text: "👋 <b>Добро пожаловать!</b>\n\nЯ заменяю тексты и фото в каналах. Поддерживаю премиум эмодзи, форматирование и динамическую подстановку <code>{link}</code> из txt-файла.",
+      text: `👋 <b>Добро пожаловать!</b> [Версия: ${VERSION}]\n\nЯ заменяю тексты и фото в каналах. Поддерживаю премиум эмодзи, форматирование и динамическую подстановку <code>{link}</code> из txt-файла.`,
       parse_mode: 'HTML',
       reply_markup: getMainMenuKb()
     });
@@ -117,7 +119,7 @@ export default async function (message) {
       const realUsername = chatInfo.username || channelUsername;
       const title = chatInfo.title || realId;
 
-      await api.editMessageText({ chat_id: adminId, message_id: waitMsg.message_id, text: "🔍 Считаю активные посты канала..." });
+      await api.editMessageText({ chat_id: adminId, message_id: waitMsg.message_id, text: "⚡️ Считаю активные посты канала..." });
 
       let targetIds = await getActivePostIds(realId, adminId);
 
