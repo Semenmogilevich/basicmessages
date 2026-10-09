@@ -2,7 +2,7 @@ import { api, db } from 'sdk';
 import { eq } from 'sdk/db';
 import { states } from '../schema.js';
 import { getMainMenuKb, getCancelKb, getUsePreviousLinksKb } from '../lib/menus.js';
-import { fetchExistingPostsWeb } from '../lib/webParser.js';
+import { getActivePostIds } from '../lib/webParser.js';
 
 export default async function (message) {
   const adminId = message.from.id;
@@ -56,12 +56,11 @@ export default async function (message) {
 
     let photoId = null;
     if (message.photo && message.photo.length > 0) {
-      photoId = message.photo[message.photo.length - 1].file_id; // Get highest resolution
+      photoId = message.photo[message.photo.length - 1].file_id;
     }
 
     if (!text && !photoId) {
-      await api.sendMessage({ chat_id: adminId, text: "Отправьте текст или фото." });
-      return;
+      return api.sendMessage({ chat_id: adminId, text: "Отправьте текст или фото." });
     }
 
     await db.update(states)
@@ -107,11 +106,10 @@ export default async function (message) {
     }
 
     if (!channelId && !channelUsername) {
-      await api.sendMessage({ chat_id: adminId, text: "❌ Не удалось распознать канал. Перешлите пост, отправьте ссылку или ID.", reply_markup: getCancelKb() });
-      return;
+      return api.sendMessage({ chat_id: adminId, text: "❌ Не удалось распознать канал. Перешлите пост, отправьте ссылку или ID.", reply_markup: getCancelKb() });
     }
 
-    const waitMsg = await api.sendMessage({ chat_id: adminId, text: "🔍 Проверяю канал и права..." });
+    const waitMsg = await api.sendMessage({ chat_id: adminId, text: "🔍 Проверяю канал..." });
 
     try {
       const chatInfo = await api.getChat({ chat_id: channelId || channelUsername });
@@ -121,10 +119,7 @@ export default async function (message) {
 
       await api.editMessageText({ chat_id: adminId, message_id: waitMsg.message_id, text: "🔍 Считаю активные посты канала..." });
 
-      let targetIds = [];
-      if (realUsername) {
-         targetIds = await fetchExistingPostsWeb(realUsername);
-      }
+      let targetIds = await getActivePostIds(realId, adminId);
 
       await db.update(states)
         .set({
@@ -139,15 +134,14 @@ export default async function (message) {
       state.channelTitle = title;
       state.targetIds = targetIds.length > 0 ? targetIds : null;
 
-      await renderMainMenu(`✅ <b>Канал выбран:</b> ${title}`);
+      await renderMainMenu(`✅ <b>Канал выбран!</b> Найдено активных постов: ${targetIds.length}`);
     } catch (e) {
-       await api.editMessageText({ chat_id: adminId, message_id: waitMsg.message_id, text: `❌ Ошибка: бот не является админом в этом канале или канал не существует.\n\n${e.description || e}`});
+       await api.editMessageText({ chat_id: adminId, message_id: waitMsg.message_id, text: `❌ Ошибка: бот не является админом в этом канале или канал не существует.\n\nДетали: ${e.message || e}`});
     }
   }
   else if (state.step === 'wait_links') {
     if (!message.document || !message.document.file_name.endsWith('.txt')) {
-      await api.sendMessage({ chat_id: adminId, text: "❌ Пожалуйста, отправьте файл формата .txt", reply_markup: getCancelKb() });
-      return;
+      return api.sendMessage({ chat_id: adminId, text: "❌ Пожалуйста, отправьте файл формата .txt", reply_markup: getCancelKb() });
     }
 
     try {
@@ -156,8 +150,7 @@ export default async function (message) {
       const lines = decoder.decode(bytes).split('\n').map(l => l.trim()).filter(l => l.length > 0);
 
       if (lines.length === 0) {
-        await api.sendMessage({ chat_id: adminId, text: "Файл пуст.", reply_markup: getCancelKb() });
-        return;
+        return api.sendMessage({ chat_id: adminId, text: "Файл пуст.", reply_markup: getCancelKb() });
       }
 
       await db.update(states)

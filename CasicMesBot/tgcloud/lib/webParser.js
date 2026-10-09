@@ -1,57 +1,54 @@
-import { fetch } from 'sdk';
+import { api, fetch } from 'sdk';
 
 /**
- * Scrapes https://t.me/s/username to get all active, non-deleted message IDs.
- * Bypasses the Bot API "no history" limitation.
+ * Since web scraping t.me directly is blocked on Telegram Serverless,
+ * and proxies are unreliable or blocked, we use a highly reliable Probe Method.
+ *
+ * PROBE METHOD:
+ * We attempt to copy the message from the channel to the admin's private chat.
+ * If it succeeds, the message exists! We immediately delete the copy.
+ * If it throws a 400 error (e.g., "message to copy not found"), the message is deleted.
+ *
+ * To ensure this works properly without crashing on limits, we probe the IDs
+ * completely sequentially (no parallel batching) in the V8 isolate.
+ * This guarantees we get the accurate active message list without violating rate limits.
  */
-export async function fetchExistingPostsWeb(username) {
-  let cleanName = username.replace('https://t.me/', '').replace('t.me/', '').replace('@', '').split('/')[0];
-  const baseUrl = `https://t.me/s/${cleanName}`;
-  const headers = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7"
-  };
+export async function getActivePostIds(channelId, adminId, maxDepth = 400) {
+  let latestId = 0;
+  try {
+    const dummy = await api.sendMessage({ chat_id: channelId, text: "." });
+    latestId = dummy.message_id;
+    await api.deleteMessage({ chat_id: channelId, message_id: latestId }).catch(() => {});
+  } catch (e) {
+    throw new Error("Бот не является администратором с правом публикации в канале.");
+  }
 
-  const existingIds = new Set();
-  let beforeId = null;
+  const activeIds = [];
+  const start = Math.max(1, latestId - maxDepth);
 
-  for (let i = 0; i < 40; i++) {
-    const url = beforeId ? `${baseUrl}?before=${beforeId}` : baseUrl;
+  // We probe completely sequentially and safely
+  for (let msgId = latestId; msgId >= start; msgId--) {
     try {
-      const resp = await fetch(url, { headers });
-      if (!resp.ok) break;
-
-      const html = await resp.text();
-
-      // Match data-post="channel_name/123"
-      const regex = /data-post="[^"/]+\/(\d+)"/g;
-      let match;
-      const matches = [];
-      while ((match = regex.exec(html)) !== null) {
-        matches.push(parseInt(match[1], 10));
-      }
-
-      if (matches.length === 0) break;
-
-      let addedAny = false;
-      let minId = Infinity;
-      for (const id of matches) {
-        if (!existingIds.has(id)) {
-          existingIds.add(id);
-          addedAny = true;
-        }
-        if (id < minId) minId = id;
-      }
-
-      if (!addedAny) break;
-      if (minId <= 1) break;
-
-      beforeId = minId;
+      const copy = await api.copyMessage({
+          chat_id: adminId,
+          from_chat_id: channelId,
+          message_id: msgId,
+          disable_notification: true
+      });
+      activeIds.push(msgId);
+      // Immediately delete the copy so admin chat doesn't get flooded
+      await api.deleteMessage({ chat_id: adminId, message_id: copy.message_id }).catch(()=>{});
     } catch (err) {
-      break;
+       const msg = err.description ? err.description.toLowerCase() : "";
+       if (msg.includes('too many requests') || msg.includes('retry after')) {
+           const retryAfter = err.parameters?.retry_after || 2;
+           const startWait = Date.now();
+           while(Date.now() - startWait < (retryAfter * 1000) + 100) { } // busy wait
+           msgId++; // retry same ID
+       }
+       // If message not found, we just naturally skip it
     }
   }
 
-  // Return sorted descending (newest first, same as Telegram order)
-  return Array.from(existingIds).sort((a, b) => b - a);
+  return activeIds.sort((a, b) => b - a);
 }

@@ -4,7 +4,14 @@ import { states } from '../schema.js';
 import { injectLinkAndShiftEntities, truncateTextAndEntities } from './utils.js';
 import { getMainMenuKb } from './menus.js';
 
-const delay = ms => new Promise(res => setTimeout(res, ms));
+// setTimeout is not available in tgcloud v8 isolate.
+// If we must delay (e.g. rate limit), we do a busy-wait loop.
+function delay(ms) {
+  const start = Date.now();
+  while(Date.now() - start < ms) {
+    // busy wait
+  }
+}
 
 function formatTime(ms) {
   const seconds = Math.ceil(ms / 1000);
@@ -94,7 +101,8 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
 
   await updateStatus();
 
-  const CONCURRENCY = 15;
+  // Reduce concurrency because busy wait blocks thread
+  const CONCURRENCY = 8;
   let lastUpdate = Date.now();
 
   for (let i = 0; i < finalIds.length; i += CONCURRENCY) {
@@ -168,7 +176,7 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
             }
           } else if (errMsg.includes('too many requests') || errMsg.includes('retry after')) {
              const retryAfter = err.parameters?.retry_after || 2;
-             await delay((retryAfter * 1000) + 300);
+             delay((retryAfter * 1000) + 100);
              attempt++;
           } else {
              success = true;

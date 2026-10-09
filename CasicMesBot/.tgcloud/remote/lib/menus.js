@@ -1,7 +1,7 @@
 export function getMainMenuKb() {
   return {
     inline_keyboard: [
-      [{ text: "📢 Выбрать канал", callback_data: "select_channel" }],
+      [{ text: "📢 Выбрать канал", callback_data: "select_channel" }, { text: "🔄 Пересчитать посты", callback_data: "recalc_posts" }],
       [{ text: "📝 Шаблон текста/фото", callback_data: "set_template" }],
       [{ text: "📄 Загрузить ссылки (.txt)", callback_data: "upload_links" }],
       [{ text: "⚙️ Диапазон сообщений", callback_data: "range_menu" }],

@@ -3,7 +3,7 @@ import { eq } from 'sdk/db';
 import { states } from '../schema.js';
 import { getMainMenuKb, getCancelKb, getRangeMenuKb } from '../lib/menus.js';
 import { runReplacementTask } from '../lib/replacer.js';
-import { fetchExistingPostsWeb } from '../lib/webParser.js';
+import { getActivePostIds } from '../lib/webParser.js';
 
 export default async function (cb) {
   const adminId = cb.from.id;
@@ -76,7 +76,27 @@ export default async function (cb) {
       });
     }
     else if (data === 'use_old_links') {
+       await db.update(states).set({ step: 'idle' }).where(eq(states.adminId, adminId)).run();
        await renderMainMenu("✅ Оставлены старые ссылки.");
+    }
+    else if (data === 'recalc_posts') {
+       if (!state.channelId) {
+         return api.answerCallbackQuery({ callback_query_id: cb.id, text: "❌ Вы не выбрали канал!", show_alert: true });
+       }
+       await api.editMessageText({
+         chat_id: cb.message.chat.id,
+         message_id: cb.message.message_id,
+         text: "🔍 Пересчитываю активные посты канала..."
+       });
+       await api.answerCallbackQuery({ callback_query_id: cb.id });
+       try {
+         const targetIds = await getActivePostIds(state.channelId, adminId);
+         await db.update(states).set({ targetIds }).where(eq(states.adminId, adminId)).run();
+         state.targetIds = targetIds;
+         await renderMainMenu(`✅ Активные посты пересчитаны: ${targetIds.length}`);
+       } catch (e) {
+         await renderMainMenu(`❌ Ошибка подсчета: ${e.message || e}`);
+       }
     }
     else if (data === 'range_menu') {
       await api.editMessageText({
@@ -96,7 +116,7 @@ export default async function (cb) {
       await api.editMessageText({
         chat_id: cb.message.chat.id,
         message_id: cb.message.message_id,
-        text: "🔢 Сколько ПЕРВЫХ сообщений заменить?",
+        text: "🔢 Сколько ПЕРВЫХ сообщений заменить (начиная с самых старых)?",
         reply_markup: getCancelKb()
       });
     }
@@ -105,7 +125,7 @@ export default async function (cb) {
       await api.editMessageText({
         chat_id: cb.message.chat.id,
         message_id: cb.message.message_id,
-        text: "🔢 Сколько ПОСЛЕДНИХ сообщений заменить?",
+        text: "🔢 Сколько ПОСЛЕДНИХ сообщений заменить (начиная с самых новых)?",
         reply_markup: getCancelKb()
       });
     }
@@ -132,36 +152,35 @@ export default async function (cb) {
       await api.editMessageText({
         chat_id: cb.message.chat.id,
         message_id: cb.message.message_id,
-        text: "⚡️ Запуск подготовки..."
+        text: "⚡️ Подготовка к замене..."
       });
       await api.answerCallbackQuery({ callback_query_id: cb.id });
 
       let targetIds = state.targetIds;
       if (!targetIds || targetIds.length === 0) {
-        await api.editMessageText({
-           chat_id: cb.message.chat.id,
-           message_id: cb.message.message_id,
-           text: "⚡️ Запуск подготовки...\nПарсю активные сообщения канала (без учета удаленных)..."
-        });
-        if (state.channelUsername) {
-           targetIds = await fetchExistingPostsWeb(state.channelUsername);
-        } else {
-           let latestId = 0;
-           try {
-             const dummy = await api.sendMessage({ chat_id: state.channelId, text: "." });
-             latestId = dummy.message_id;
-             await api.deleteMessage({ chat_id: state.channelId, message_id: latestId });
-           } catch (e) {}
-           targetIds = [];
-           for (let i = latestId; i > Math.max(0, latestId - 1000); i--) targetIds.push(i);
+        try {
+          await api.editMessageText({
+            chat_id: cb.message.chat.id,
+            message_id: cb.message.message_id,
+            text: "⚡️ Подготовка...\n\nПарсю живые посты канала (может занять 5-15 секунд)..."
+          });
+          targetIds = await getActivePostIds(state.channelId, adminId);
+          await db.update(states).set({ targetIds }).where(eq(states.adminId, adminId)).run();
+        } catch (e) {
+          await api.editMessageText({
+            chat_id: cb.message.chat.id,
+            message_id: cb.message.message_id,
+            text: `❌ Ошибка парсинга канала:\n${e.message || e}`,
+            reply_markup: getMainMenuKb()
+          });
+          return;
         }
-        await db.update(states).set({ targetIds }).where(eq(states.adminId, adminId)).run();
       }
 
       await runReplacementTask(adminId, cb.message.chat.id, cb.message.message_id).catch(console.error);
     }
 
-    if (data !== 'start_replacement') {
+    if (data !== 'start_replacement' && data !== 'recalc_posts') {
       await api.answerCallbackQuery({ callback_query_id: cb.id }).catch(()=>{});
     }
   } catch (err) {
