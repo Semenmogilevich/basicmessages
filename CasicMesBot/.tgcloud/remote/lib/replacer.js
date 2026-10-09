@@ -25,21 +25,19 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
   const state = await db.select().from(states).where(eq(states.adminId, adminId)).get();
   if (!state) return;
 
-  const { channelId, templateText, templateEntities, links, targetIds, rangeType, rangeStartX, rangeEndY } = state;
+  const { channelId, templateText, templatePhoto, templateEntities, links, targetIds, rangeType, rangeStartX, rangeEndY } = state;
   let linkIndex = state.linkIndex || 0;
 
   if (!targetIds || targetIds.length === 0) {
     await api.editMessageText({
       chat_id: statusChatId,
       message_id: statusMsgId,
-      text: "❌ В канале не найдено сообщений.",
+      text: "❌ В канале не найдено активных сообщений.",
       reply_markup: getMainMenuKb()
     });
     return;
   }
 
-  // targetIds is sorted newest first (descending). Reverse it if we want chronological, but Telegram users usually mean newest = first for lists, but chronological for ranges.
-  // The original python logic treated "1_to_x" as chronological (oldest to newest). Let's sort oldest first.
   let sortedIds = [...targetIds].sort((a, b) => a - b);
 
   let finalIds = sortedIds;
@@ -48,7 +46,6 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
   } else if (rangeType === 'first_x') {
     finalIds = sortedIds.slice(0, rangeStartX);
   } else if (rangeType === 'x_to_y') {
-    // 1-based indexing for users
     const startIdx = Math.max(0, rangeStartX - 1);
     const endIdx = rangeEndY;
     finalIds = sortedIds.slice(startIdx, endIdx);
@@ -87,14 +84,12 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
         message_id: statusMsgId,
         text: `⚡️ <b>Замена сообщений...</b>\n\n` +
               `${bar} ${pct}%\n\n` +
-              `🔄 Проверено: <b>${checkedCount} / ${totalTarget}</b>\n` +
-              `✅ Успешно: <b>${editedCount}</b>\n` +
+              `🔄 Обработано: <b>${checkedCount} / ${totalTarget}</b>\n` +
+              `✅ Успешно заменено: <b>${editedCount}</b>\n` +
               `⏳ Осталось: <b>${etaStr}</b>`,
         parse_mode: 'HTML'
       });
-    } catch (e) {
-      // Ignore not modified
-    }
+    } catch (e) {}
   };
 
   await updateStatus();
@@ -106,7 +101,7 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
     const batch = finalIds.slice(i, i + CONCURRENCY);
 
     const tasks = batch.map(async (msgId) => {
-      let currentText = templateText;
+      let currentText = templateText || "";
       let currentEntities = templateEntities || [];
 
       if (currentText.includes('{link}') && links && links.length > 0) {
@@ -118,19 +113,33 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
         linkIndex++;
       }
 
-      const { text: safeText, entities: safeEntities } = truncateTextAndEntities(currentText, currentEntities, 4096);
-
       let attempt = 0;
       let success = false;
+
       while (attempt < 5 && !success) {
         try {
-          await api.editMessageText({
-            chat_id: channelId,
-            message_id: msgId,
-            text: safeText,
-            entities: safeEntities.length > 0 ? safeEntities : undefined,
-            disable_web_page_preview: false
-          });
+          if (templatePhoto) {
+            const { text: capText, entities: capEntities } = truncateTextAndEntities(currentText, currentEntities, 1024);
+            await api.editMessageMedia({
+              chat_id: channelId,
+              message_id: msgId,
+              media: {
+                type: 'photo',
+                media: templatePhoto,
+                caption: capText || undefined,
+                caption_entities: capEntities.length > 0 ? capEntities : undefined
+              }
+            });
+          } else {
+            const { text: safeText, entities: safeEntities } = truncateTextAndEntities(currentText, currentEntities, 4096);
+            await api.editMessageText({
+              chat_id: channelId,
+              message_id: msgId,
+              text: safeText,
+              entities: safeEntities.length > 0 ? safeEntities : undefined,
+              disable_web_page_preview: false
+            });
+          }
           editedCount++;
           success = true;
         } catch (err) {
@@ -142,13 +151,13 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
              break;
           }
 
-          if (errMsg.includes('there is no text') || errMsg.includes('message is not a text message')) {
+          if ((errMsg.includes('there is no text') || errMsg.includes('message is not a text message')) && !templatePhoto) {
             try {
               const { text: capText, entities: capEntities } = truncateTextAndEntities(currentText, currentEntities, 1024);
               await api.editMessageCaption({
                 chat_id: channelId,
                 message_id: msgId,
-                caption: capText,
+                caption: capText || undefined,
                 caption_entities: capEntities.length > 0 ? capEntities : undefined
               });
               editedCount++;
@@ -171,7 +180,6 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
 
     await Promise.all(tasks);
 
-    // Update status every 2 seconds or at end
     if (Date.now() - lastUpdate > 2000 || checkedCount === totalTarget) {
       await updateStatus();
       lastUpdate = Date.now();

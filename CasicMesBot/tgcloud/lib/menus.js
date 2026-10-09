@@ -1,8 +1,8 @@
 export function getMainMenuKb() {
   return {
     inline_keyboard: [
-      [{ text: "📝 Шаблон текста", callback_data: "set_template" }],
       [{ text: "📢 Выбрать канал", callback_data: "select_channel" }],
+      [{ text: "📝 Шаблон текста/фото", callback_data: "set_template" }],
       [{ text: "📄 Загрузить ссылки (.txt)", callback_data: "upload_links" }],
       [{ text: "⚙️ Диапазон сообщений", callback_data: "range_menu" }],
       [{ text: "🚀 ЗАПУСТИТЬ", callback_data: "start_replacement" }]
@@ -25,6 +25,15 @@ export function getCancelKb() {
   return {
     inline_keyboard: [
       [{ text: "❌ Отмена", callback_data: "cancel_state" }]
+    ]
+  };
+}
+
+export function getUsePreviousLinksKb() {
+  return {
+    inline_keyboard: [
+      [{ text: "✅ Использовать старые ссылки", callback_data: "use_old_links" }],
+      [{ text: "🆕 Загрузить новые", callback_data: "upload_links" }]
     ]
   };
 }

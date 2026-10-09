@@ -13,10 +13,13 @@ export default async function (cb) {
   if (!state) return;
 
   const renderMainMenu = async (textPrefix = "") => {
-    // Generate human-readable info
     let info = textPrefix ? `${textPrefix}\n\n` : "⚙️ <b>Панель управления</b>\n\n";
-    info += `📢 Канал: <b>${state.channelTitle || "Не выбран"}</b>\n`;
-    info += `📝 Шаблон: <b>${state.templateText ? "Задан ✅" : "Нет ❌"}</b>\n`;
+    info += `📢 Канал: <b>${state.channelTitle || "Не выбран"}</b>`;
+    if (state.targetIds) info += ` <i>(Активных постов: ${state.targetIds.length})</i>`;
+    info += `\n📝 Шаблон: <b>${state.templateText || state.templatePhoto ? "Задан ✅" : "Нет ❌"}</b> `;
+    if (state.templatePhoto) info += `<i>(с фото 🖼)</i>`;
+    info += "\n";
+
     if (state.templateText && state.templateText.includes('{link}')) {
       info += `🔗 Ссылок загружено: <b>${state.links ? state.links.length : 0}</b>\n`;
     }
@@ -39,7 +42,7 @@ export default async function (cb) {
   try {
     if (data === 'cancel_state') {
       await db.update(states).set({ step: 'idle' }).where(eq(states.adminId, adminId)).run();
-      state = await db.select().from(states).where(eq(states.adminId, adminId)).get(); // Reload state
+      state = await db.select().from(states).where(eq(states.adminId, adminId)).get();
       await renderMainMenu();
     }
     else if (data === 'set_template') {
@@ -47,7 +50,7 @@ export default async function (cb) {
       await api.editMessageText({
         chat_id: cb.message.chat.id,
         message_id: cb.message.message_id,
-        text: "📝 <b>Отправьте текст для замены.</b>\n\nВы можете использовать премиум-эмодзи и форматирование. Если хотите подставлять разные ссылки, используйте в тексте слово <code>{link}</code>.",
+        text: "📝 <b>Отправьте текст или фото с подписью.</b>\n\nВы можете использовать премиум-эмодзи и форматирование. Для замены разных ссылок используйте слово <code>{link}</code>.",
         parse_mode: 'HTML',
         reply_markup: getCancelKb()
       });
@@ -57,7 +60,7 @@ export default async function (cb) {
       await api.editMessageText({
         chat_id: cb.message.chat.id,
         message_id: cb.message.message_id,
-        text: "📢 <b>Перешлите любой пост из канала</b>, в котором хотите менять сообщения (бот должен быть там администратором).",
+        text: "📢 <b>Отправьте канал:</b>\n\n- Перешлите пост из канала\n- Пришлите ссылку (https://t.me/channel)\n- Пришлите username (@channel)\n- Пришлите ID (-100...)",
         parse_mode: 'HTML',
         reply_markup: getCancelKb()
       });
@@ -67,16 +70,19 @@ export default async function (cb) {
       await api.editMessageText({
         chat_id: cb.message.chat.id,
         message_id: cb.message.message_id,
-        text: "📄 <b>Отправьте .txt файл</b>, где каждая ссылка с новой строки.\nОни будут подставляться на место <code>{link}</code> по кругу.",
+        text: "📄 <b>Отправьте .txt файл</b>, где каждая ссылка с новой строки.\nОни будут подставляться на место <code>{link}</code>.",
         parse_mode: 'HTML',
         reply_markup: getCancelKb()
       });
+    }
+    else if (data === 'use_old_links') {
+       await renderMainMenu("✅ Оставлены старые ссылки.");
     }
     else if (data === 'range_menu') {
       await api.editMessageText({
         chat_id: cb.message.chat.id,
         message_id: cb.message.message_id,
-        text: "Выберите, какие сообщения заменять:",
+        text: "Выберите, какие сообщения заменять (по их реальным порядковым номерам):",
         reply_markup: getRangeMenuKb()
       });
     }
@@ -90,7 +96,7 @@ export default async function (cb) {
       await api.editMessageText({
         chat_id: cb.message.chat.id,
         message_id: cb.message.message_id,
-        text: "🔢 Введите число X (сколько ПЕРВЫХ сообщений заменить):",
+        text: "🔢 Сколько ПЕРВЫХ сообщений заменить?",
         reply_markup: getCancelKb()
       });
     }
@@ -99,7 +105,7 @@ export default async function (cb) {
       await api.editMessageText({
         chat_id: cb.message.chat.id,
         message_id: cb.message.message_id,
-        text: "🔢 Введите число X (сколько ПОСЛЕДНИХ сообщений заменить):",
+        text: "🔢 Сколько ПОСЛЕДНИХ сообщений заменить?",
         reply_markup: getCancelKb()
       });
     }
@@ -114,31 +120,32 @@ export default async function (cb) {
     }
     else if (data === 'start_replacement') {
       if (!state.channelId) {
-        await api.answerCallbackQuery({ callback_query_id: cb.id, text: "❌ Вы не выбрали канал!", show_alert: true });
-        return;
+        return api.answerCallbackQuery({ callback_query_id: cb.id, text: "❌ Вы не выбрали канал!", show_alert: true });
       }
-      if (!state.templateText) {
-        await api.answerCallbackQuery({ callback_query_id: cb.id, text: "❌ Вы не задали шаблон текста!", show_alert: true });
-        return;
+      if (!state.templateText && !state.templatePhoto) {
+        return api.answerCallbackQuery({ callback_query_id: cb.id, text: "❌ Вы не задали шаблон текста/фото!", show_alert: true });
       }
-      if (state.templateText.includes('{link}') && (!state.links || state.links.length === 0)) {
-        await api.answerCallbackQuery({ callback_query_id: cb.id, text: "❌ Шаблон содержит {link}, но ссылки не загружены!", show_alert: true });
-        return;
+      if (state.templateText && state.templateText.includes('{link}') && (!state.links || state.links.length === 0)) {
+        return api.answerCallbackQuery({ callback_query_id: cb.id, text: "❌ Шаблон содержит {link}, но ссылки не загружены!", show_alert: true });
       }
 
       await api.editMessageText({
         chat_id: cb.message.chat.id,
         message_id: cb.message.message_id,
-        text: "⚡️ Запуск подготовки...\nПарсю активные сообщения канала..."
+        text: "⚡️ Запуск подготовки..."
       });
       await api.answerCallbackQuery({ callback_query_id: cb.id });
 
       let targetIds = state.targetIds;
       if (!targetIds || targetIds.length === 0) {
+        await api.editMessageText({
+           chat_id: cb.message.chat.id,
+           message_id: cb.message.message_id,
+           text: "⚡️ Запуск подготовки...\nПарсю активные сообщения канала (без учета удаленных)..."
+        });
         if (state.channelUsername) {
            targetIds = await fetchExistingPostsWeb(state.channelUsername);
         } else {
-           // Fallback dummy probe
            let latestId = 0;
            try {
              const dummy = await api.sendMessage({ chat_id: state.channelId, text: "." });
@@ -155,7 +162,7 @@ export default async function (cb) {
     }
 
     if (data !== 'start_replacement') {
-      await api.answerCallbackQuery({ callback_query_id: cb.id });
+      await api.answerCallbackQuery({ callback_query_id: cb.id }).catch(()=>{});
     }
   } catch (err) {
     if (!err.message || (!err.message.includes('message is not modified') && !err.message.includes('query is too old'))) {

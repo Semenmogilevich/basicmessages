@@ -5,13 +5,14 @@ export const states = table('states', {
   step: text('step').notNull().default('idle'),
   channelId: text('channel_id'),
   channelTitle: text('channel_title'),
-  channelUsername: text('channel_username'), // Needed for parsing
+  channelUsername: text('channel_username'),
   templateText: text('template_text'),
+  templatePhoto: text('template_photo'), // Stores the file_id for the photo to replace
   templateEntities: json('template_entities'),
   links: json('links'),
   linkIndex: integer('link_index').default(0),
   rangeType: text('range_type').default('all'),
   rangeStartX: integer('range_start_x').default(0),
   rangeEndY: integer('range_end_y').default(0),
-  targetIds: json('target_ids') // Array of active valid IDs
+  targetIds: json('target_ids')
 });
