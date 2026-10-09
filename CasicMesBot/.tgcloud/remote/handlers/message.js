@@ -4,7 +4,7 @@ import { states } from '../schema.js';
 import { getMainMenuKb, getCancelKb, getUsePreviousLinksKb } from '../lib/menus.js';
 import { getActivePostIds } from '../lib/webParser.js';
 
-const VERSION = "v1.2 (Fast Edit Probe)";
+const VERSION = "1.3";
 
 export default async function (message) {
   const adminId = message.from.id;
@@ -41,11 +41,43 @@ export default async function (message) {
     });
   };
 
+  const runParserAndSave = async (chatId, msgId, channelId) => {
+      const startTime = Date.now();
+      const onProgress = async (found, checked, total) => {
+         // Update more frequently
+         if (checked % 15 === 0 || checked === total) {
+           const pct = ((checked/total)*100).toFixed(0);
+
+           let etaStr = "Вычисляется...";
+           if (checked > 0) {
+              const elapsed = Date.now() - startTime;
+              const msPerItem = elapsed / checked;
+              const remaining = total - checked;
+              const s = Math.ceil((remaining * msPerItem) / 1000);
+              const m = Math.floor(s / 60);
+              const sec = s % 60;
+              etaStr = m > 0 ? `${m} мин ${sec} сек` : `${sec} сек`;
+           }
+
+           await api.editMessageText({
+              chat_id: chatId,
+              message_id: msgId,
+              text: `🔍 <b>Считаю активные сообщения...</b>\n\nПроверено: <b>${checked}</b> из <b>${total}</b> (${pct}%)\nНайдено живых: <b>${found}</b>\n⏳ Осталось: <b>${etaStr}</b>`,
+              parse_mode: 'HTML'
+           }).catch(()=>{});
+         }
+      };
+      const targetIds = await getActivePostIds(channelId, adminId, 400, onProgress);
+      await db.update(states).set({ targetIds }).where(eq(states.adminId, adminId)).run();
+      state.targetIds = targetIds;
+      return targetIds;
+  };
+
   if (message.text === '/start') {
     await db.update(states).set({ step: 'idle' }).where(eq(states.adminId, adminId)).run();
     await api.sendMessage({
       chat_id: adminId,
-      text: `👋 <b>Добро пожаловать!</b> [Версия: ${VERSION}]\n\nЯ заменяю тексты и фото в каналах. Поддерживаю премиум эмодзи, форматирование и динамическую подстановку <code>{link}</code> из txt-файла.`,
+      text: `👋 <b>Добро пожаловать!</b> [Версия: v${VERSION}]\n\nЯ заменяю тексты и фото в каналах. Поддерживаю премиум эмодзи, форматирование и динамическую подстановку <code>{link}</code> из txt-файла.`,
       parse_mode: 'HTML',
       reply_markup: getMainMenuKb()
     });
@@ -119,26 +151,26 @@ export default async function (message) {
       const realUsername = chatInfo.username || channelUsername;
       const title = chatInfo.title || realId;
 
-      await api.editMessageText({ chat_id: adminId, message_id: waitMsg.message_id, text: "⚡️ Считаю активные посты канала..." });
-
-      let targetIds = await getActivePostIds(realId, adminId);
-
       await db.update(states)
         .set({
           step: 'idle',
           channelId: realId,
           channelTitle: title,
           channelUsername: realUsername,
-          targetIds: targetIds.length > 0 ? targetIds : null
+          targetIds: null
         })
         .where(eq(states.adminId, adminId)).run();
 
+      state.channelId = realId;
       state.channelTitle = title;
-      state.targetIds = targetIds.length > 0 ? targetIds : null;
+      state.targetIds = null;
 
-      await renderMainMenu(`✅ <b>Канал выбран!</b> Найдено активных постов: ${targetIds.length}`);
+      await api.editMessageText({ chat_id: adminId, message_id: waitMsg.message_id, text: "⚡️ Считаю активные посты канала..." });
+      await runParserAndSave(adminId, waitMsg.message_id, realId);
+
+      await renderMainMenu(`✅ <b>Канал выбран!</b>`);
     } catch (e) {
-       await api.editMessageText({ chat_id: adminId, message_id: waitMsg.message_id, text: `❌ Ошибка: бот не является админом в этом канале или канал не существует.\n\nДетали: ${e.message || e}`});
+       await api.editMessageText({ chat_id: adminId, message_id: waitMsg.message_id, text: `❌ Ошибка: бот не является админом в этом канале или канал не существует.\n\nДетали: ${e.message || e}`}).catch(()=>{});
     }
   }
   else if (state.step === 'wait_links') {

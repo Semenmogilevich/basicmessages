@@ -4,13 +4,9 @@ import { states } from '../schema.js';
 import { injectLinkAndShiftEntities, truncateTextAndEntities } from './utils.js';
 import { getMainMenuKb } from './menus.js';
 
-// setTimeout is not available in tgcloud v8 isolate.
-// If we must delay (e.g. rate limit), we do a busy-wait loop.
 function delay(ms) {
   const start = Date.now();
-  while(Date.now() - start < ms) {
-    // busy wait
-  }
+  while(Date.now() - start < ms) { }
 }
 
 function formatTime(ms) {
@@ -22,6 +18,7 @@ function formatTime(ms) {
 }
 
 function getProgressBar(current, total, width = 10) {
+  if (total === 0) return '⬜️'.repeat(width);
   const progress = Math.min(Math.max(current / total, 0), 1);
   const filled = Math.round(width * progress);
   const empty = width - filled;
@@ -75,7 +72,7 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
 
   const updateStatus = async () => {
     try {
-      const pct = ((checkedCount / totalTarget) * 100).toFixed(0);
+      const pct = totalTarget > 0 ? ((checkedCount / totalTarget) * 100).toFixed(0) : 0;
       const bar = getProgressBar(checkedCount, totalTarget, 10);
 
       const elapsed = Date.now() - startTime;
@@ -91,9 +88,9 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
         message_id: statusMsgId,
         text: `⚡️ <b>Замена сообщений...</b>\n\n` +
               `${bar} ${pct}%\n\n` +
-              `🔄 Обработано: <b>${checkedCount} / ${totalTarget}</b>\n` +
-              `✅ Успешно заменено: <b>${editedCount}</b>\n` +
-              `⏳ Осталось: <b>${etaStr}</b>`,
+              `🔄 Проверено: <b>${checkedCount} / ${totalTarget}</b>\n` +
+              `✅ Успешно заменено: <b>${editedCount} / ${totalTarget}</b>\n` +
+              `⏳ Осталось времени: <b>${etaStr}</b>`,
         parse_mode: 'HTML'
       });
     } catch (e) {}
@@ -101,8 +98,7 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
 
   await updateStatus();
 
-  // Reduce concurrency because busy wait blocks thread
-  const CONCURRENCY = 8;
+  const CONCURRENCY = 15;
   let lastUpdate = Date.now();
 
   for (let i = 0; i < finalIds.length; i += CONCURRENCY) {
@@ -175,8 +171,9 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
                success = true;
             }
           } else if (errMsg.includes('too many requests') || errMsg.includes('retry after')) {
-             const retryAfter = err.parameters?.retry_after || 2;
-             delay((retryAfter * 1000) + 100);
+             const retryAfter = err.parameters?.retry_after || 1;
+             const startWait = Date.now();
+             while(Date.now() - startWait < (retryAfter * 1000) + 100) { }
              attempt++;
           } else {
              success = true;
@@ -188,7 +185,8 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
 
     await Promise.all(tasks);
 
-    if (Date.now() - lastUpdate > 2000 || checkedCount === totalTarget) {
+    // Update status every ~1.5 seconds
+    if (Date.now() - lastUpdate > 1500 || checkedCount === totalTarget) {
       await updateStatus();
       lastUpdate = Date.now();
     }
@@ -203,7 +201,7 @@ export async function runReplacementTask(adminId, statusChatId, statusMsgId) {
     message_id: statusMsgId,
     text: `🏁 <b>Замена завершена!</b>\n\n` +
           `📢 Канал: <b>${state.channelTitle}</b>\n` +
-          `✅ Изменено: <b>${editedCount}</b> из ${totalTarget}\n` +
+          `✅ Успешно изменено: <b>${editedCount}</b> из <b>${totalTarget}</b>\n` +
           `⏱ Затрачено: <b>${formatTime(Date.now() - startTime)}</b>\n\n` +
           `Главное меню:`,
     parse_mode: 'HTML',

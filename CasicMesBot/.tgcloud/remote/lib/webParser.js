@@ -1,16 +1,14 @@
-import { api, fetch } from 'sdk';
+import { api } from 'sdk';
 
 /**
- * FAST PROBING STRATEGY (Without copying/forwarding).
- * We simply attempt to edit the message's text to its current text, or just apply
- * `editMessageReplyMarkup` with an empty keyboard.
+ * FAST PROBING STRATEGY V4 (The ultimate safe method).
+ * We simply attempt to edit the message's text to its current text, or apply `editMessageReplyMarkup`.
+ * We do this strictly sequentially but without `delay` on success.
+ * If we hit 429 Too Many Requests, we do a synchronous busy-wait, then continue.
  *
- * If it succeeds or throws "message is not modified", THE MESSAGE EXISTS!
- * If it throws "message to edit not found", THE MESSAGE IS DELETED!
- *
- * We do this in fast parallel batches!
+ * We will update the progress in the UI so the user knows it's not frozen.
  */
-export async function getActivePostIds(channelId, adminId, maxDepth = 400) {
+export async function getActivePostIds(channelId, adminId, maxDepth = 400, onProgress) {
   let latestId = 0;
   try {
     const dummy = await api.sendMessage({ chat_id: channelId, text: "." });
@@ -22,49 +20,45 @@ export async function getActivePostIds(channelId, adminId, maxDepth = 400) {
 
   const activeIds = [];
   const start = Math.max(1, latestId - maxDepth);
+  const total = latestId - start + 1;
+  let checkedCount = 0;
 
-  // Fast parallel batching
-  const BATCH_SIZE = 15;
-  for (let i = latestId; i >= start; i -= BATCH_SIZE) {
-    const batch = [];
-    for (let j = 0; j < BATCH_SIZE && (i - j) >= start; j++) {
-      batch.push(i - j);
-    }
+  let lastProgressUpdate = Date.now();
 
-    const tasks = batch.map(async (msgId) => {
+  for (let msgId = latestId; msgId >= start; msgId--) {
+    let success = false;
+    let attempt = 0;
+    while (!success && attempt < 3) {
       try {
-        // We try to edit the reply markup (to what it already is, or just an empty one)
-        // If it throws "message is not modified" -> exists!
-        // If it throws "message to edit not found" -> deleted!
-        // If it succeeds -> exists!
         await api.editMessageReplyMarkup({
             chat_id: channelId,
             message_id: msgId,
             reply_markup: { inline_keyboard: [] }
         });
         activeIds.push(msgId);
+        success = true;
       } catch (err) {
          const msg = err.description ? err.description.toLowerCase() : "";
-         // If it's not modified, it exists (and it had no keyboard or the same keyboard)
-         if (msg.includes('message is not modified')) {
+         if (msg.includes('message is not modified') || msg.includes('there is no text') || msg.includes('message is not a text message')) {
              activeIds.push(msgId);
-         } else if (msg.includes('there is no text') || msg.includes('message is not a text message')) {
-             // If we tried to edit markup of a media, it might say something else or succeed, but if it throws this, it exists.
-             activeIds.push(msgId);
+             success = true;
          } else if (msg.includes('too many requests') || msg.includes('retry after')) {
-             // Let's assume rate limits mean the message exists, otherwise it wouldn't rate limit the edit...
-             // but to be safe we wait.
              const retryAfter = err.parameters?.retry_after || 1;
              const startWait = Date.now();
-             while(Date.now() - startWait < (retryAfter * 1000) + 100) { } // busy wait
-             // Push it anyway so we don't skip entirely on rate limit (fallback heuristic)
-             activeIds.push(msgId);
+             while(Date.now() - startWait < (retryAfter * 1000) + 100) { }
+             attempt++;
+         } else {
+             // "message to edit not found" -> deleted
+             success = true;
          }
-         // If "message to edit not found", we do nothing (it's deleted)
       }
-    });
+    }
+    checkedCount++;
 
-    await Promise.all(tasks);
+    if (onProgress && Date.now() - lastProgressUpdate > 2000) {
+       await onProgress(activeIds.length, checkedCount, total).catch(()=>{});
+       lastProgressUpdate = Date.now();
+    }
   }
 
   return activeIds.sort((a, b) => b - a);

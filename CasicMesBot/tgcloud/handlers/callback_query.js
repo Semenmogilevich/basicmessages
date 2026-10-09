@@ -39,6 +39,37 @@ export default async function (cb) {
     });
   };
 
+  const runParserAndSave = async (chatId, msgId, channelId) => {
+      const startTime = Date.now();
+      const onProgress = async (found, checked, total) => {
+         if (checked % 20 === 0 || checked === total) {
+           const pct = ((checked/total)*100).toFixed(0);
+
+           let etaStr = "Вычисляется...";
+           if (checked > 0) {
+              const elapsed = Date.now() - startTime;
+              const msPerItem = elapsed / checked;
+              const remaining = total - checked;
+              const s = Math.ceil((remaining * msPerItem) / 1000);
+              const m = Math.floor(s / 60);
+              const sec = s % 60;
+              etaStr = m > 0 ? `${m} мин ${sec} сек` : `${sec} сек`;
+           }
+
+           await api.editMessageText({
+              chat_id: chatId,
+              message_id: msgId,
+              text: `🔍 <b>Считаю активные сообщения...</b>\n\nПроверено: <b>${checked}</b> из <b>${total}</b> (${pct}%)\nНайдено живых: <b>${found}</b>\n⏳ Осталось времени: <b>${etaStr}</b>`,
+              parse_mode: 'HTML'
+           }).catch(()=>{});
+         }
+      };
+      const targetIds = await getActivePostIds(channelId, adminId, 400, onProgress);
+      await db.update(states).set({ targetIds }).where(eq(states.adminId, adminId)).run();
+      state.targetIds = targetIds;
+      return targetIds;
+  };
+
   try {
     if (data === 'cancel_state') {
       await db.update(states).set({ step: 'idle' }).where(eq(states.adminId, adminId)).run();
@@ -86,14 +117,12 @@ export default async function (cb) {
        await api.editMessageText({
          chat_id: cb.message.chat.id,
          message_id: cb.message.message_id,
-         text: "🔍 Пересчитываю активные посты канала..."
+         text: "🔍 Подготовка к парсингу..."
        });
        await api.answerCallbackQuery({ callback_query_id: cb.id });
        try {
-         const targetIds = await getActivePostIds(state.channelId, adminId);
-         await db.update(states).set({ targetIds }).where(eq(states.adminId, adminId)).run();
-         state.targetIds = targetIds;
-         await renderMainMenu(`✅ Активные посты пересчитаны: ${targetIds.length}`);
+         await runParserAndSave(cb.message.chat.id, cb.message.message_id, state.channelId);
+         await renderMainMenu(`✅ Активные посты пересчитаны!`);
        } catch (e) {
          await renderMainMenu(`❌ Ошибка подсчета: ${e.message || e}`);
        }
@@ -162,10 +191,9 @@ export default async function (cb) {
           await api.editMessageText({
             chat_id: cb.message.chat.id,
             message_id: cb.message.message_id,
-            text: "⚡️ Подготовка...\n\nПарсю живые посты канала (может занять 5-15 секунд)..."
+            text: "⚡️ Подготовка...\n\nСчитаю живые посты канала..."
           });
-          targetIds = await getActivePostIds(state.channelId, adminId);
-          await db.update(states).set({ targetIds }).where(eq(states.adminId, adminId)).run();
+          await runParserAndSave(cb.message.chat.id, cb.message.message_id, state.channelId);
         } catch (e) {
           await api.editMessageText({
             chat_id: cb.message.chat.id,
